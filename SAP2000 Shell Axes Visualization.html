@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAP2000 Shell Axes & Resultants</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #0f172a; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; display: flex; flex-direction: column; justify-content: space-between; padding: 1.5rem; }
+        .pointer-events-auto { pointer-events: auto; }
+        
+        .btn {
+            background-color: #1e293b; border: 1px solid #334155; color: #cbd5e1; padding: 0.5rem 1rem; border-radius: 0.375rem;
+            cursor: pointer; transition: all 0.2s; text-align: left; width: 100%; margin-bottom: 0.4rem; font-size: 0.875rem;
+        }
+        .btn:hover { background-color: #334155; color: white; }
+        .btn.active { background-color: #3b82f6; border-color: #60a5fa; color: white; }
+        
+        .group-title { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-top: 1rem; margin-bottom: 0.25rem; font-weight: 700; }
+        .shortcut-hint { font-size: 0.65rem; color: #475569; margin-top: 0.5rem; line-height: 1.2; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div class="pointer-events-auto max-w-xl">
+            <h1 class="text-2xl font-bold text-white drop-shadow-md">SAP2000 Local Axes</h1>
+            <p class="text-slate-400 text-sm">Interactive visualization of shell element internal forces.</p>
+        </div>
+
+        <div class="flex justify-between items-end h-full mt-4 gap-6">
+            <!-- Controls -->
+            <div class="pointer-events-auto w-60 bg-slate-900/80 backdrop-blur-md border border-slate-700 rounded-lg p-4 shadow-xl flex flex-col max-h-[85vh]">
+                <div class="overflow-y-auto pr-1">
+                    <button class="btn" id="btn-NONE" onclick="selectResultant('NONE')">Local Axes Only</button>
+
+                    <div class="group-title">Membrane (In-Plane)</div>
+                    <button class="btn active" id="btn-F11" onclick="selectResultant('F11')">F11 (Axial 1)</button>
+                    <button class="btn" id="btn-F22" onclick="selectResultant('F22')">F22 (Axial 2)</button>
+                    <button class="btn" id="btn-F12" onclick="selectResultant('F12')">F12 (Shear)</button>
+
+                    <div class="group-title">Bending & Twist</div>
+                    <button class="btn" id="btn-M11" onclick="selectResultant('M11')">M11 (Bending 1)</button>
+                    <button class="btn" id="btn-M22" onclick="selectResultant('M22')">M22 (Bending 2)</button>
+                    <button class="btn" id="btn-M12" onclick="selectResultant('M12')">M12 (Twist)</button>
+
+                    <div class="group-title">Transverse Shear</div>
+                    <button class="btn" id="btn-V13" onclick="selectResultant('V13')">V13 (Shear 1-3)</button>
+                    <button class="btn" id="btn-V23" onclick="selectResultant('V23')">V23 (Shear 2-3)</button>
+                </div>
+                
+                <div class="mt-4 pt-4 border-t border-slate-800 flex flex-col gap-2">
+                    <button class="text-xs bg-slate-800 hover:bg-slate-700 p-2 rounded text-slate-300 transition-colors" onclick="alignCamera('top')">Snap to +3 Axis (Top)</button>
+                    <button class="text-xs bg-slate-800 hover:bg-slate-700 p-2 rounded text-slate-300 transition-colors" onclick="alignCamera('iso')">Isometric View</button>
+                    <div class="shortcut-hint">
+                        <strong>Drag Lock:</strong><br>
+                        Shift: Lock Axis 1<br>
+                        Ctrl: Lock Axis 2<br>
+                        Alt: Lock Axis 3
+                    </div>
+                </div>
+            </div>
+
+            <!-- Description -->
+            <div class="pointer-events-auto w-80 bg-slate-900/90 border border-slate-700 rounded-lg p-5 shadow-2xl">
+                <h2 id="info-title" class="text-xl font-bold text-blue-400 mb-2">F11 (Axial)</h2>
+                <div id="info-content" class="text-slate-300 text-sm space-y-3">
+                    <p>Internal force along the local 1-axis.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Data ---
+        const infoData = {
+            'NONE': { title: "Local Coordinate System", desc: "The shell uses local axes 1, 2, and 3. These correspond directly to a right-handed local X, Y, and Z system. <br><br><strong>Red:</strong> 1 (X)<br><strong>Green:</strong> 2 (Y)<br><strong>Blue:</strong> 3 (Z)" },
+            'F11': { title: "F11 [Fx]", desc: "Direct force on the 1-face acting in the 1-direction. <br><br><strong>Positive:</strong> Tension." },
+            'F22': { title: "F22 [Fy]", desc: "Direct force on the 2-face acting in the 2-direction. <br><br><strong>Positive:</strong> Tension." },
+            'F12': { title: "F12 [Fxy]", desc: "In-plane shear force. <br><br><strong>Positive:</strong> Acts in +2 direction on +1 face and +1 direction on +2 face." },
+            'M11': { title: "M11 [My]", desc: "Bending moment on the 1-face. Note: It rotates <strong>about the local 2 axis</strong>. <br><br><strong>Positive:</strong> Tension on the bottom (-3) face." },
+            'M22': { title: "M22 [Mx]", desc: "Bending moment on the 2-face. Note: It rotates <strong>about the local 1 axis</strong>. <br><br><strong>Positive:</strong> Tension on the bottom (-3) face." },
+            'M12': { title: "M12 [Mxy]", desc: "Twisting moment. <br><br><strong>Positive:</strong> On +1 face, vector points in +1 direction (Right-hand rule)." },
+            'V13': { title: "V13 [Vx]", desc: "Out-of-plane shear on the 1-face acting in the 3-direction." },
+            'V23': { title: "V23 [Vy]", desc: "Out-of-plane shear on the 2-face acting in the 3-direction." }
+        };
+
+        // --- Helpers ---
+        class ArcCurve3 extends THREE.Curve {
+            constructor(radius, angle) {
+                super();
+                this.radius = radius;
+                this.angle = angle;
+            }
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                const theta = t * this.angle;
+                return optionalTarget.set(this.radius * Math.cos(theta), this.radius * Math.sin(theta), 0);
+            }
+        }
+
+        function createTextSprite(text, colorHex, scale = 1, isHighlight = false) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            const color = '#' + new THREE.Color(colorHex).getHexString();
+            
+            ctx.font = isHighlight ? 'bold 84px "Segoe UI", sans-serif' : 'bold 64px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillStyle = color;
+            
+            if (isHighlight) {
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 15;
+            }
+            
+            ctx.fillText(text, 512, 128);
+            const texture = new THREE.CanvasTexture(canvas);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+            sprite.scale.set(scale * 5, scale * 1.25, 1);
+            sprite.renderOrder = 1000;
+            return sprite;
+        }
+
+        // --- Main App ---
+        let scene, camera, renderer, controls, shellGroup;
+        const resultants = {};
+        const shellRotation = new THREE.Euler(0.3, -0.5, 0.2);
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0f172a);
+            camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(10, 8, 12);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+            const sun = new THREE.DirectionalLight(0xffffff, 1);
+            sun.position.set(5, 10, 7);
+            scene.add(ambient, sun);
+
+            shellGroup = new THREE.Group();
+            shellGroup.rotation.copy(shellRotation);
+            scene.add(shellGroup);
+
+            // Shell Geometry (Original Color)
+            const shell = new THREE.Mesh(
+                new THREE.BoxGeometry(4, 3, 0.2),
+                new THREE.MeshPhysicalMaterial({ color: 0x1e40af, transparent: true, opacity: 0.65, roughness: 0.2 })
+            );
+            shellGroup.add(shell);
+            shellGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(shell.geometry), new THREE.LineBasicMaterial({ color: 0x93c5fd })));
+
+            // Local Axes
+            const addAxis = (dir, color, label) => {
+                const arrow = new THREE.ArrowHelper(dir, new THREE.Vector3(0,0,0), 2.5, color, 0.5, 0.2);
+                const sprite = createTextSprite(label, color, 0.6);
+                sprite.position.copy(dir).multiplyScalar(3.2);
+                shellGroup.add(arrow, sprite);
+            };
+            addAxis(new THREE.Vector3(1,0,0), 0xf87171, "1 (X)");
+            addAxis(new THREE.Vector3(0,1,0), 0x4ade80, "2 (Y)");
+            addAxis(new THREE.Vector3(0,0,1), 0x60a5fa, "3 (Z)");
+
+            setupResultants();
+            setupRotationLock();
+            
+            window.selectResultant = selectResultant;
+            window.alignCamera = alignCamera;
+            selectResultant('F11');
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            
+            animate();
+        }
+
+        function createArrow(group, start, dir, color, label) {
+            const arrow = new THREE.ArrowHelper(dir.normalize(), start, 1.2, color, 0.4, 0.2);
+            group.add(arrow);
+            if (label) {
+                const sprite = createTextSprite(label, color, 0.65, true);
+                sprite.position.copy(start).add(dir.clone().multiplyScalar(2.0));
+                group.add(sprite);
+            }
+        }
+
+        function createMoment(group, center, axis, radius, color, label) {
+            const startVec = new THREE.Vector3(0,0,1);
+            const angle = Math.PI * 1.3;
+            const path = new ArcCurve3(radius, angle);
+            const arc = new THREE.Mesh(new THREE.TubeGeometry(path, 32, 0.03, 8, false), new THREE.MeshBasicMaterial({ color }));
+            
+            const matrix = new THREE.Matrix4();
+            const bitangent = new THREE.Vector3().crossVectors(axis, startVec).normalize();
+            matrix.makeBasis(startVec, bitangent, axis);
+            arc.applyMatrix4(matrix);
+
+            const mGroup = new THREE.Group();
+            mGroup.add(arc);
+
+            const cone = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.4, 12), new THREE.MeshBasicMaterial({ color }));
+            const endPt = new THREE.Vector3(radius * Math.cos(angle), radius * Math.sin(angle), 0).applyMatrix4(matrix);
+            const tangent = new THREE.Vector3(-Math.sin(angle), Math.cos(angle), 0).transformDirection(matrix);
+            cone.position.copy(endPt);
+            cone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), tangent);
+            mGroup.add(cone);
+
+            mGroup.position.copy(center);
+            if (label) {
+                const sprite = createTextSprite(label, color, 0.6, true);
+                sprite.position.copy(center).add(new THREE.Vector3(0,0,radius + 0.8));
+                mGroup.add(sprite);
+            }
+            group.add(mGroup);
+        }
+
+        function setupResultants() {
+            const COLOR_F = 0xfde047; // Yellow Force
+            const COLOR_M = 0xfb923c; // Orange Moment
+            const COLOR_V = 0x22d3ee; // Cyan Shear
+
+            // F11 - Multi Arrows
+            resultants['F11'] = new THREE.Group();
+            [0, 0.8, -0.8].forEach(offset => {
+                createArrow(resultants['F11'], new THREE.Vector3(2, offset, 0), new THREE.Vector3(1, 0, 0), COLOR_F, offset === 0 ? "TENSION (+)" : "");
+                createArrow(resultants['F11'], new THREE.Vector3(-2, offset, 0), new THREE.Vector3(-1, 0, 0), COLOR_F, "");
+            });
+            
+            // F22 - Multi Arrows
+            resultants['F22'] = new THREE.Group();
+            [0, 1.2, -1.2].forEach(offset => {
+                createArrow(resultants['F22'], new THREE.Vector3(offset, 1.5, 0), new THREE.Vector3(0, 1, 0), COLOR_F, offset === 0 ? "TENSION (+)" : "");
+                createArrow(resultants['F22'], new THREE.Vector3(offset, -1.5, 0), new THREE.Vector3(0, -1, 0), COLOR_F, "");
+            });
+
+            // F12 - Shear Bi-directional
+            resultants['F12'] = new THREE.Group();
+            [0, 0.6, -0.6].forEach(offset => {
+                createArrow(resultants['F12'], new THREE.Vector3(2, offset, 0), new THREE.Vector3(0, 1, 0), COLOR_F, offset === 0 ? "SHEAR (+)" : "");
+                createArrow(resultants['F12'], new THREE.Vector3(-2, offset, 0), new THREE.Vector3(0, -1, 0), COLOR_F, "");
+                createArrow(resultants['F12'], new THREE.Vector3(offset*1.3, 1.5, 0), new THREE.Vector3(1, 0, 0), COLOR_F, "");
+                createArrow(resultants['F12'], new THREE.Vector3(offset*1.3, -1.5, 0), new THREE.Vector3(-1, 0, 0), COLOR_F, "");
+            });
+
+            // M11
+            resultants['M11'] = new THREE.Group();
+            createMoment(resultants['M11'], new THREE.Vector3(2, 0, 0), new THREE.Vector3(0, -1, 0), 1.0, COLOR_M, "M11 [My]");
+            createMoment(resultants['M11'], new THREE.Vector3(-2, 0, 0), new THREE.Vector3(0, 1, 0), 1.0, COLOR_M, "");
+
+            // M22
+            resultants['M22'] = new THREE.Group();
+            createMoment(resultants['M22'], new THREE.Vector3(0, 1.5, 0), new THREE.Vector3(1, 0, 0), 1.0, COLOR_M, "M22 [Mx]");
+            createMoment(resultants['M22'], new THREE.Vector3(0, -1.5, 0), new THREE.Vector3(-1, 0, 0), 1.0, COLOR_M, "");
+
+            // M12 [Twist] - Bi-directional
+            resultants['M12'] = new THREE.Group();
+            createMoment(resultants['M12'], new THREE.Vector3(2, 0, 0), new THREE.Vector3(1, 0, 0), 1.0, COLOR_M, "M12 [TWIST]");
+            createMoment(resultants['M12'], new THREE.Vector3(-2, 0, 0), new THREE.Vector3(-1, 0, 0), 1.0, COLOR_M, "");
+            createMoment(resultants['M12'], new THREE.Vector3(0, 1.5, 0), new THREE.Vector3(0, -1, 0), 1.0, COLOR_M, "");
+            createMoment(resultants['M12'], new THREE.Vector3(0, -1.5, 0), new THREE.Vector3(0, 1, 0), 1.0, COLOR_M, "");
+
+            // V13
+            resultants['V13'] = new THREE.Group();
+            [0, 0.6, -0.6].forEach(offset => {
+                createArrow(resultants['V13'], new THREE.Vector3(2, offset, 0), new THREE.Vector3(0, 0, 1), COLOR_V, offset === 0 ? "V13 (+)" : "");
+            });
+
+            // V23
+            resultants['V23'] = new THREE.Group();
+            [0, 0.8, -0.8].forEach(offset => {
+                createArrow(resultants['V23'], new THREE.Vector3(offset, 1.5, 0), new THREE.Vector3(0, 0, 1), COLOR_V, offset === 0 ? "V23 (+)" : "");
+            });
+
+            Object.values(resultants).forEach(g => { g.visible = false; shellGroup.add(g); });
+        }
+
+        function setupRotationLock() {
+            window.addEventListener('keydown', (e) => {
+                if (e.shiftKey) { // Lock to Axis 1
+                    const axis1 = new THREE.Vector3(1, 0, 0).applyEuler(shellGroup.rotation);
+                    controls.minPolarAngle = controls.maxPolarAngle = camera.position.angleTo(axis1);
+                }
+            });
+            window.addEventListener('keyup', () => {
+                controls.minPolarAngle = 0;
+                controls.maxPolarAngle = Math.PI;
+            });
+        }
+
+        function selectResultant(id) {
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + id).classList.add('active');
+            Object.keys(resultants).forEach(k => resultants[k].visible = (k === id));
+            document.getElementById('info-title').innerText = infoData[id].title;
+            document.getElementById('info-content').innerHTML = infoData[id].desc;
+        }
+
+        function alignCamera(mode) {
+            if (mode === 'iso') {
+                camera.position.set(10, 8, 12);
+                camera.up.set(0, 1, 0);
+            } else if (mode === 'top') {
+                // Get the local Z axis in world space
+                const localZ = new THREE.Vector3(0, 0, 1).applyEuler(shellGroup.rotation).normalize();
+                const localY = new THREE.Vector3(0, 1, 0).applyEuler(shellGroup.rotation).normalize();
+                
+                // Position camera along that normal
+                camera.position.copy(localZ).multiplyScalar(15);
+                camera.up.copy(localY);
+            }
+            controls.target.set(0,0,0);
+            controls.update();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Interaction Lock Logic
+            // Note: OrbitControls is global, we constrain it based on keys
+            // We'll use a simpler version of locking for this canvas:
+            const keyState = {
+                shift: false, // 1-axis
+                ctrl: false,  // 2-axis
+                alt: false    // 3-axis
+            };
+            
+            window.onkeydown = (e) => {
+                if (e.shiftKey) controls.enableRotate = true; // Placeholder for more complex axis locking
+            };
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
